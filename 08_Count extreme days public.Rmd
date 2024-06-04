@@ -1,0 +1,680 @@
+---
+title: "count extreme days"
+output: html_document
+date: "2024-01-09"
+editor_options: 
+  chunk_output_type: console
+---
+```{r}
+library(raster)
+library(tidycensus)
+library(sf)
+library(sp)
+library(dplyr)
+library(tidyr)
+library(weathermetrics)
+library(ggplot2)
+library(lubridate)
+library(ggpubr)
+
+Theme <-  theme_minimal()+ 
+  theme(text = element_text(family="Palatino"),  # Set Palatino for all text elements
+        legend.title = element_text(family="Palatino"),  # Specifically set Palatino for legend title
+        legend.text = element_text(family="Palatino"),
+        axis.text.x = element_text(face="bold", family="Palatino",
+                           size=12),
+          axis.text.y = element_text(face="bold",family="Palatino",
+                           size=12)) 
+```
+
+```{r}
+Lake <- read_sf('./Lake_Michigan_Shoreline.shp')
+pm25 <- read.csv('./censustract_HourlyPM25.csv')
+rh <- read.csv('./censustract_HourlyRH.csv')
+air <- read.csv('./outcome_data/censustract_HourlyTemp.csv')
+
+pm25$DateTime <- ymd_hms(pm25$DateTime)
+rh$DateTime <- ymd_hms(rh$DateTime)
+air$DateTime <- ymd_hms(air$DateTime)
+
+# Merge df1 and df2
+merged_df1_df2 <- merge(pm25, rh, by = c("GEOID","DateTime"), all = TRUE)
+
+# Merge the result with df3
+df <- merge(merged_df1_df2, air, by = c("GEOID","DateTime"), all = TRUE)
+
+df$Ta_F <- celsius.to.fahrenheit(df$Temperature, round = 2)
+df$date <- as.Date(df$DateTime)
+```
+
+# Calculate HI
+```{r}
+df$HI_f <- heat.index(t = df$Ta_F,  rh = df$RH,
+  temperature.metric = 'fahrenheit', output.metric = NULL, round = 0)
+df$GEOID<- as.character(df$GEOID)
+```
+
+# select extreme hours
+```{r}
+extremePM <-df %>%filter(PM25 > 12)
+extremeHI <-df %>%filter(HI_f > 80)
+extreme<- df %>%filter((PM25 > 12)&(HI_f > 80))
+
+```
+
+# Visualization
+```{r}
+df <- read.csv('./censustract_HourlyAll.csv')
+df$GEOID <- as.character(df$GEOID)
+#extremePM <-df %>%filter(PM25 > 12)
+#extremeHI <-df %>%filter(HI_f > 80)
+#extreme<- df %>%filter((PM25 > 12)&(HI_f > 80))
+
+```
+
+# Air qaulity Advisory days 
+```{r}
+# Convert DateTime to Date if it's not already
+df$Date <- as.Date(df$DateTime)
+
+# Aggregate data to daily averages
+daily_data <- df %>%
+  mutate(year = year(Date))%>%
+  #filter(year =='2019')%>%
+  group_by(Date, GEOID) %>%
+  summarize(PM25_Mean_Value  = mean(PM25, na.rm = TRUE))
+
+# Calculate the 98th percentile
+percentile_90 <- quantile(daily_data$PM25_Mean_Value , probs = 0.95, na.rm=T)
+
+# Identify days exceeding both the 98th percentile and 35 µg/m³
+exceeding_days <- daily_data %>%
+  filter( PM25_Mean_Value  > percentile_90 )
+
+# Display the resulting days
+print(exceeding_days)
+
+
+daily_data <- df %>%
+  mutate(year = year(Date))%>%
+    filter(year =='2018')%>%
+  group_by(Date, GEOID) %>%
+  summarize(HI_Mean_Value = mean(HI_C, na.rm = TRUE))
+
+# Calculate the 98th percentile
+percentile_90 <- quantile(daily_data$HI_Mean_Value, probs = 0.95, na.rm=T)
+
+# Identify days exceeding both the 98th percentile and 35 µg/m³
+exceeding_days_heat <- daily_data %>%
+  filter( HI_Mean_Value > percentile_90 )
+
+# Display the resulting days
+print(exceeding_days_heat)
+```
+
+#Heat Advisory days
+```{r}
+library(dplyr)
+library(lubridate)
+
+# Define nighttime hours, e.g., 10 PM to 6 AM
+night_start <- 22
+night_end <- 6
+
+df_processed <- df %>%drop_na(date)%>%
+  mutate(
+    Date = as.Date(DateTime),
+    Hour = hour(DateTime),
+    IsNight = Hour >= night_start | Hour < night_end
+  ) %>%
+  group_by(Date) %>%
+  summarize(
+    MaxHI = max(HI_f, na.rm = TRUE),
+    MinNightTemp = min(ifelse(IsNight, Ta_F, NA), na.rm = TRUE)
+  ) %>%
+  mutate(
+    HighHeatIndex = MaxHI >= 100,
+    WarmNight = MinNightTemp >= 75
+  ) %>%
+  ungroup()
+
+# Identifying periods meeting the criteria
+df_periods <- df_processed %>%
+  mutate(
+    QualifyingDay = HighHeatIndex & WarmNight) %>%
+  filter(QualifyingDay == TRUE)%>%
+  #group_by(Date)%>%
+  summarize(
+    NumberOfDays = n()) 
+
+# Output the periods meeting the criteria
+print(df_periods)
+
+Extremeadvisorydays <- unique(df_periods$Date)
+```
+
+# Polygon data
+```{r}
+library(sf)
+Lake <- read_sf('./Lake_Michigan_Shoreline.shp')
+
+boundary <- read_sf('./geo_export_38016476-fa8f-41ab-8da6-d638d7db6c80.shp')
+boundarydessolove <- boundary%>% group_by(area) %>% summarize() 
+
+poly <-  get_acs(geography = "tract",  #spatial resolution
+                    variables = c(medincome = "B19013_001"),
+                    state = "IL", county = "COOK", geometry = TRUE)%>%
+  drop_na()%>%
+  dplyr::select(-c(NAME,estimate,variable,moe))
+
+Boundary<- st_transform(boundarydessolove, crs(poly))
+
+chicago<- st_intersection(poly,Boundary)
+```
+
+# Extreme PM25 & heat
+```{r}
+
+#PMExtremeadvisorydays 
+
+PM25<-exceeding_days%>%group_by(GEOID)%>%
+  summarize(
+    PM25_Mean_Value = mean(PM25_Mean_Value, na.rm = TRUE),
+    PM25_Count = n())
+
+HI <- exceeding_days_heat%>%group_by(GEOID)%>%
+  summarize(
+    HI_Mean_Value = mean(HI_Mean_Value, na.rm = TRUE),
+    HI_Count = n())
+
+test <- left_join(chicago,HI)%>%drop_na(HI_Count)
+mergedf1 <- merge(chicago,PM25, by = c("GEOID"), all = TRUE)
+DF <- merge(mergedf1,HI, by = c("GEOID"), all = TRUE)
+```
+
+```{r}
+library(RColorBrewer)
+
+p1 <- ggplot(data = DF) +
+  geom_sf(aes(fill = PM25_Count ), color = NA) + 
+  scale_fill_gradient(low = "#f7fcb9", high = "#31a354", 
+                      #name = expression(paste('PM2.5'," (",μg/m^3,")", sep=" "))
+                      name = "Count"
+                      ) +
+  geom_sf(data = Lake, fill = '#9ecae1', size = 3) +
+  #labs(title = "PM2.5 Levels by Census Tract") +
+  ylim(41.645, 42) +
+  #xlim(-87.90011, -87.54) +
+  scale_x_continuous(breaks = seq(-87.9, -87.54, by = 0.1), limits = c(-87.9, -87.54))+  # Set x-axis breaks and limits
+  xlab("Longitude") +
+  ylab("Latitude") +
+  Theme+ 
+  theme(legend.position = c(0.15, 0.2))
+
+  #theme(legend.position = "bottom")
+p1
+
+
+# Calculate quantiles for PM2.5 data
+quantiles <- quantile(DF$PM25_Mean_Value, probs = seq(0, 1, length.out = 5), na.rm = TRUE)
+
+# Create a factor variable for quantile groups
+DF$PM25_Quantile <- cut(DF$PM25_Mean_Value, breaks = c(-Inf, quantiles, Inf), include.lowest = TRUE, labels = FALSE)
+
+# Define custom colors for each quantile
+#colors <- c("#f7fcb9", "#addd8e", "#31a354", "#006837", "#004529")
+colors <- colorRampPalette(c("#f7fcb9", "#004529"))(5)
+
+sd(DF$PM25_Mean_Value,na.rm = T)
+# Plotting
+p2 <- ggplot(data = DF) +
+  geom_sf(aes(fill = factor(PM25_Quantile)), color = NA) +
+  scale_fill_manual(values = colors, 
+                    name = expression(paste('Quantile Break of PM2.5'," (",μg/m^3,")", sep=" ")),
+                    labels = paste("Q", 1:5))  +
+  geom_sf(data = Lake, fill = '#9ecae1', size = 3) +
+  ylim(41.645, 42) +
+  scale_x_continuous(breaks = seq(-87.9, -87.54, by = 0.1), limits = c(-87.9, -87.54))+  # Set x-axis breaks and limits
+  xlab("Longitude") +
+  ylab("Latitude") +
+  Theme + 
+  theme(legend.position = c(0.35, 0.2))
+p2
+```
+
+# Extreme HI
+```{r}
+p3 <- ggplot(data = DF) +
+  geom_sf(aes(fill = HI_Count ), color = NA) + 
+  scale_fill_gradient(low = "#fde0dd", high = "#c51b8a", name = "Count", na.value = "gray80") +
+  geom_sf(data = Lake, fill = '#9ecae1', size = 3) +
+  #labs(title = "HI Levels by Census Tract") +
+  ylim(41.645, 42) +
+  scale_x_continuous(breaks = seq(-87.9, -87.54, by = 0.1), limits = c(-87.9, -87.54))+  # Set x-axis breaks and limits
+  xlab("Longitude") +
+  ylab("Latitude") +
+    Theme +
+  theme(legend.position = c(0.15, 0.2))
+
+p3
+
+# Create a factor variable for quantile groups
+quantiles <- quantile(DF$HI_Mean_Value, probs = seq(0, 1, length.out = 5), na.rm = TRUE)
+
+DF$HI_Quantile <- cut(DF$HI_Mean_Value, breaks = c(-Inf, quantiles, Inf), include.lowest = TRUE, labels = FALSE)
+
+# Define custom colors for each quantile
+colors <- colorRampPalette(c("#fde0dd", "#c51b8a"))(5)
+
+p4 <-ggplot(data = DF) +
+  geom_sf(aes(fill = factor(HI_Quantile)), color = NA) +
+  scale_fill_manual(values = colors, 
+                    name ="Quantile Break of HI(°C)",
+                    labels = paste("Q", 1:5))  +
+  geom_sf(data = Lake, fill = '#9ecae1', size = 3) +
+  ylim(41.645, 42) +
+  scale_x_continuous(breaks = seq(-87.9, -87.54, by = 0.1), limits = c(-87.9, -87.54))+  # Set x-axis breaks and limits
+  xlab("Longitude") +
+  ylab("Latitude") +
+  Theme + 
+  theme(legend.position = c(0.32, 0.2))
+p4
+```
+
+# Bivariate map in R
+```{r}
+# load dependencies
+library(biscale)
+library(cowplot)
+
+# create classes
+data <- bi_class(DF, x = HI_Mean_Value, y =PM25_Mean_Value, style = "quantile", dim = 3)
+```
+
+#Color: https://cran.r-project.org/web/packages/biscale/vignettes/bivariate_palettes.html
+```{r}
+map<-ggplot() +
+  geom_sf(data = data, mapping = aes(fill = bi_class), color = "white", size = 0.1, show.legend = FALSE) +
+  bi_scale_fill(pal = "PinkGrn", dim = 3) +
+  geom_sf(data = Lake, fill = '#9ecae1', size = 3) +
+  ylim(41.645, 42) +
+  scale_x_continuous(breaks = seq(-87.9, -87.54, by = 0.1), limits = c(-87.9, -87.54))+  # Set x-axis breaks and limits
+  Theme
+  
+
+legend <- bi_legend(pal = "PinkGrn",
+                    dim = 3,
+                    xlab = "Higher PM2.5",
+                    ylab = "Higher HI",
+                    size = 8)+Theme
+
+p5 <- ggdraw() +
+  draw_plot(map, 0, 0, 1, 1) +
+  draw_plot(legend, 0.25, 0.07, 0.25, 0.25)
+```
+
+```{r}
+library(ggpubr)
+figure <- ggarrange(p1, p2,p3,p4,p5,
+                    labels = c("(A)", "(B)", "(C)","(D)","(E)"),
+                    ncol = 2, nrow = 3)
+figure
+
+
+```
+
+# Demographic correlation 
+```{r}
+#getting variable names
+acs20 <- load_variables(2019, "acs5", cache = TRUE)
+Vars <- acs20  %>% filter(grepl("65", label ))
+
+demodf <-  get_acs(geography = "tract",  #spatial resolution
+                    variables  = c(medincome = "B19013_001",poverty ="B06010_004",value = "B25079_001", elderlyE="B26208_010E",elderlydisable = "B26208_011E", disable ="B10052_002",  AfricanAmerican ="B02001_003",Hispanic="B03001_003",lesseduE ="B06009_002E",ForeignE = "B06009_025E", mobilehomerentE ="B25032_022E", totalpopE = "B01003_001E",builtyear60E = "B25107_008E",builtyear50E = "B25107_009E", builtyear40E = "B25107_010E",rentE="B07013_003E",totalhouse ="B07013_001E"),state = "IL", county = "COOK", output = "wide") %>% dplyr::select(ends_with("E") | "GEOID")
+
+
+
+# Assuming your data frame is named 'your_dataframe'
+demodf <- demodf %>%
+  mutate(
+        povertyE_prop = povertyE / totalpopE,
+    elderlyE_prop = (elderlyE / totalpopE),
+    disableE_prop = disableE / totalpopE,
+     lesseduE_prop = lesseduE / totalpopE,
+    AfricanAmericanE_prop = AfricanAmericanE / totalpopE,
+    HispanicE_prop = HispanicE / totalpopE,
+    disable_prop = disableE/ totalpopE,
+    Foreign_prop = ForeignE/totalpopE
+  )%>%
+    mutate(
+    mobilehome_prop= mobilehomerentE /totalhouse,
+    oldhouses_prop = (builtyear40E+builtyear50E)/totalhouse,
+    rent_prop = rentE/totalhouse
+
+  )
+data <- bi_class(DF, x = HI_Mean_Value, y =PM25_Mean_Value, style = "quantile", dim = 3)
+
+demoDF <- merge(demodf, data, by = 'GEOID') #%>%dplyr::select(-c( NAME, valueM,  medincomeM))
+
+```
+
+
+```{r}
+
+colordic <- list(bi_class = c('1-1', '1-2', '1-3', '2-1', '2-2', '2-3', '3-1','3-2','3-3', "1-NA", "NA-1", "2-NA", "3-NA","NA-NA"),colors =c("#d3d3d3",'#90b87e','#459b22','#ca85af','#8a7469','#42611d','#bc227d','#80144a','#3e1114', "gray30","gray30",'gray30','gray30','gray30'))
+
+colordic <- as.data.frame(colordic)
+
+demoDF<- demoDF%>% filter(bi_class != "NA-NA")
+p1<- ggplot(demoDF, aes(x = bi_class, y = HispanicE_prop, fill = bi_class)) +
+  geom_boxplot(show.legend = F) +
+  ylim(0,1)+
+  scale_fill_manual(values = colordic$colors, breaks = colordic$bi_class) +
+  ylab('Proportion of Hispanic Population')+
+  xlab('Multivariate classification category')+
+  Theme
+
+p2<- ggplot(demoDF, aes(x = bi_class, y = povertyE_prop, fill = bi_class)) +
+  geom_boxplot() +
+  ylim(0,1)+
+  scale_fill_manual(values = colordic$colors, breaks = colordic$bi_class) +
+  ylab('Proportion of population with financial shortfall')+
+  xlab('Multivariate classification category')+
+  Theme
+
+p3<- ggplot(demoDF, aes(x = bi_class, y =  AfricanAmericanE_prop, fill = bi_class)) +
+  geom_boxplot(show.legend = F) +
+  ylim(0,1)+
+  scale_fill_manual(values = colordic$colors, breaks = colordic$bi_class) +
+  ylab('Proportion of African American Population')+
+  xlab('Multivariate classification category')+
+  Theme
+
+p4<- ggplot(demoDF, aes(x = bi_class, y = lesseduE_prop  , fill = bi_class)) +
+  geom_boxplot(show.legend = F) +
+  ylim(0,1)+
+  scale_fill_manual(values = colordic$colors, breaks = colordic$bi_class) +
+  ylab('Proportion of population with limited education')+
+  xlab('Multivariate classification category')+
+  Theme
+
+p5<- ggplot(demoDF, aes(x = bi_class, y = Foreign_prop  , fill = bi_class)) +
+  geom_boxplot(show.legend = F) +
+  ylim(0,1)+
+  scale_fill_manual(values = colordic$colors, breaks = colordic$bi_class) +
+  ylab('Proportion of immigrant population')+
+  xlab('Multivariate classification category')+
+  Theme
+
+p6<- ggplot(demoDF, aes(x = bi_class, y = rent_prop   , fill = bi_class)) +
+  geom_boxplot(show.legend = F) +
+  ylim(0,1)+
+  scale_fill_manual(values = colordic$colors, breaks = colordic$bi_class) +
+  ylab('Proportion of renter-occupied housing units')+
+  xlab('Multivariate classification category')+
+  Theme
+
+legend <- bi_legend(pal = "PinkGrn",
+                    dim = 3,
+                    xlab = "Higher PM2.5",
+                    ylab = "Higher HI",
+                    size = 8)+Theme
+p2<-ggdraw() +
+  draw_plot(p2, 0, 0, 1, 1) +
+  draw_plot(legend, 0.5, 0.3, 0.25, 1.1)
+
+figure <- ggarrange(p1, p2,p3,p5, p6, p4,
+                    labels = c("(A)", "(B)", "(C)","(D)","(E)","(F)"),
+                    ncol = 2, nrow = 3)
+figure
+
+
+
+```
+
+
+
+#anova test
+```{r}
+
+VAR <- c("HispanicE_prop","povertyE_prop","AfricanAmericanE_prop","Foreign_prop","lesseduE_prop","rent_prop")
+res_aov <- aov(sqrt(rent_prop) ~ bi_class,
+  data =demoDF
+)
+res_aov
+summary(res_aov)
+```
+
+#examine normality 
+```{r}
+par(mfrow = c(1, 2)) # combine plots
+
+# histogram
+hist(res_aov$residuals)
+
+# QQ-plot
+library(car)
+qqPlot(res_aov$residuals,
+  id = FALSE # id = FALSE to remove point identification
+)
+```
+
+#examine equal variance
+```{r}
+leveneTest(sqrt(rent_prop) ~ bi_class,
+  data =demoDF
+)
+```
+
+#anova test
+```{r}
+
+demoDF2<-demoDF%>%filter(bi_class!="NA-1"&bi_class!="NA-NA")
+
+library("report") # Load the package every time you start R
+
+
+res_aov <- oneway.test(sqrt(rent_prop) ~ bi_class,
+  data =demoDF2,
+   var.equal = FALSE
+)
+res_aov
+```
+
+
+#Creating circular barchart
+```{r}
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(viridis)
+Theme <-  theme_minimal()+ 
+  theme(text = element_text(family="Palatino",size=15),  # Set Palatino for all text elements
+        legend.title = element_text(family="Palatino",size=15),  # Specifically set Palatino for legend title
+        legend.text = element_text(family="Palatino",size=15),
+        axis.title.x = element_text(face="bold", family="Palatino",
+                           size=18),
+        axis.title.y = element_text(face="bold", family="Palatino",
+                           size=18),
+        axis.text.x = element_text(face="bold", family="Palatino",
+                           size=15),
+        axis.text.y = element_text(face="bold",family="Palatino",
+                           size=15),
+        strip.text.x = element_text(size = 15, face = "bold",,family="Palatino")) 
+```
+
+```{r}
+pm25 <- read.csv('./censustract_HourlyPM25.csv')
+rh <- read.csv('./censustract_HourlyRH.csv')
+air <- read.csv('./censustract_HourlyTemp.csv')
+pm25$DateTime <- ymd_hms(pm25$DateTime)
+rh$DateTime <- ymd_hms(rh$DateTime)
+air$DateTime <- ymd_hms(air$DateTime)
+
+# Merge df1 and df2
+merged_df1_df2 <- merge(pm25, rh, by = c("GEOID","DateTime"), all = TRUE)
+
+# Merge the result with df3
+df <- merge(merged_df1_df2, air, by = c("GEOID","DateTime"), all = TRUE)
+
+df <- read.csv('./censustract_HourlyAll.csv')
+```
+
+```{r}
+pm25<- df %>%
+  mutate(DateTime = as.POSIXct(DateTime, format = "%Y-%m-%d %H:%M:%S"),
+         month = month(DateTime, label = TRUE),  # Extract month and convert to a factor with labels
+         hour = hour(DateTime))
+
+```
+
+```{r}
+# Calculate the maximum PM2.5 for each hour within each month
+df_max <- pm25 %>%
+  mutate(year = year(DateTime))%>%
+  filter(year == '2018')%>%
+  group_by(month, hour) %>%
+  summarise(mean_PM25 = mean(PM25, na.rm = TRUE))  # Summarize data to find the maximum PM2.5
+df_max$label_pos <- df_max$mean_PM25 +5  # Adjust '1' based on your visual requirement
+
+# Plot
+# Define a custom color palette with 24 distinct green colors
+
+# Plot with viridis palette
+pm25_18 <- ggplot(df_max, aes(x = factor(hour), y = mean_PM25, fill = factor(hour))) +
+  geom_col() +
+  coord_polar(start = 0) +
+  facet_wrap(~month) +
+  labs(x = "Time of the day", y = expression(paste('Mean PM2.5'," (",μg/m^3,")", sep=" ")), fill = "Hour") +
+  #scale_fill_manual(values = 'Greens') + 
+  #scale_fill_brewer(palette = "Greens") +
+  scale_fill_viridis(option = "viridis",discrete = TRUE,direction = -1)  +
+  #scale_fill_viridis('Time of the day',palette = 'viridis', discrete = TRUE)+  # Using viridis for discrete data
+   geom_text(aes(y = label_pos, label = sprintf("%.2f", mean_PM25)), check_overlap = TRUE,
+            position = position_nudge(y = 0.2),  # Nudging position up a bit
+            color = "black", fontface = "bold",family = "Palatino", alpha = 0.6, size =4) +
+      Theme+
+    expand_limits(y = c(0, max(df_max$mean_PM25) * 1.8)) +
+    geom_segment(x = 0, y = 0, xend = 2, yend = 0, color = "grey", alpha = 0.5, size = 0.5) +
+    theme(text = element_text(family = "Palatino"),  # Apply Palatino to all text elements
+        axis.text.x = element_text(angle = 0, hjust = 1),
+        legend.position = "none")
+
+pm25_18
+```
+
+```{r}
+# Calculate the maximum PM2.5 for each hour within each month
+df_max <- pm25 %>%
+  mutate(year = year(DateTime))%>%
+  filter(year == '2019')%>%
+  group_by(month, hour) %>%
+  summarise(mean_PM25 = mean(PM25, na.rm = TRUE))  # Summarize data to find the maximum PM2.5
+df_max$label_pos <- df_max$mean_PM25 +5  # Adjust '1' based on your visual requirement
+
+# Plot
+# Define a custom color palette with 24 distinct green colors
+
+
+# Plot with viridis palette
+pm25_19 <- ggplot(df_max, aes(x = factor(hour), y = mean_PM25, fill = factor(hour))) +
+  geom_col() +
+  coord_polar(start = 0) +
+  facet_wrap(~month) +
+  labs(x = "Time of the day", y = expression(paste('Mean PM2.5'," (",μg/m^3,")", sep=" ")), fill = "Hour") +
+  #scale_fill_manual(values = 'Greens') + 
+  #scale_fill_brewer(palette = "Greens") +
+  scale_fill_viridis(option = "viridis",discrete = TRUE,direction = -1)  +
+  #scale_fill_viridis('Time of the day',palette = 'viridis', discrete = TRUE)+  # Using viridis for discrete data
+   geom_text(aes(y = label_pos, label = sprintf("%.2f", mean_PM25)), check_overlap = TRUE,
+            position = position_nudge(y = 0.2),  # Nudging position up a bit
+            color = "black", fontface = "bold",family = "Palatino", alpha = 0.6, size =4) +
+  theme(text = element_text(family = "Palatino"),  # Apply Palatino to all text elements
+        axis.text.x = element_text(angle = 90, hjust = 1))+
+  # Base line and group labels are not typically needed in a circular bar chart,
+  # but if you need to add any static annotations or reference lines:
+  geom_segment(x = 0, y = 0, xend = 1, yend = 0, color = "grey", alpha = 0.5, size = 0.5) +
+    expand_limits(y = c(0, max(df_max$mean_PM25) * 1.8)) +
+
+  #theme_minimal() +
+  Theme 
+
+pm25_19
+```
+
+#HI
+```{r}
+df<- df %>%
+  mutate(DateTime = as.POSIXct(DateTime, format = "%Y-%m-%d %H:%M:%S"),
+         month = month(DateTime, label = TRUE),  # Extract month and convert to a factor with labels
+         hour = hour(DateTime)) 
+
+# Calculate the maximum PM2.5 for each hour within each month
+df_max <- df %>%
+  mutate(year = year(DateTime))%>%
+  filter(year == '2018')%>%
+  group_by(month, hour) %>%
+  summarise(mean_HI = mean(HI_C, na.rm = TRUE))  # Summarize data to find the maximum PM2.5
+df_max$label_pos <- df_max$mean_HI +10  # Adjust '1' based on your visual requirement
+
+# Plot
+# Define a custom color palette with 24 distinct green colors
+
+# Plot with viridis palette
+HI_18 <- ggplot(df_max, aes(x = factor(hour), y = mean_HI, fill = factor(hour))) +
+  geom_col() +
+  coord_polar(start = 0) +
+  facet_wrap(~month) +
+  labs(x = "Time of the day", y = "Mean HI(°C)", fill = "Hour") +
+  scale_fill_viridis(option = "magma", discrete = TRUE, direction = -1) +
+  geom_text(aes(y = label_pos, label = sprintf("%.1f", mean_HI)), check_overlap = TRUE,
+            position = position_nudge(y = 0.5),  # Nudging position up a bit
+            color = "black", fontface = "bold", family = "Palatino", alpha = 0.6, size =4) +
+  expand_limits(y = c(0, max(df_max$mean_HI) * 1.8)) +
+  Theme+
+    geom_segment(x = 0, y = 0, xend = 2, yend = 0, color = "grey", alpha = 0.5, size = 0.5) +
+    theme(text = element_text(family = "Palatino"),  # Apply Palatino to all text elements
+        axis.text.x = element_text(angle = 0, hjust = 1),
+        legend.position = "none") # Turn off the legend
+
+HI_18
+```
+
+```{r}
+df_max <- df %>%
+  mutate(year = year(DateTime))%>%
+  filter(year == '2019')%>%
+  group_by(month, hour) %>%
+  summarise(mean_HI = mean(HI_C, na.rm = TRUE))  # Summarize data to find the maximum PM2.5
+df_max$label_pos <- df_max$mean_HI + 10  # Adjust '1' based on your visual requirement
+
+# Plot with viridis palette
+HI_19 <- ggplot(df_max, aes(x = factor(hour), y = mean_HI, fill = factor(hour))) +
+  geom_col() +
+  coord_polar(start = 0) +
+  facet_wrap(~month) +
+  labs(x = "Time of the day", y = "Mean HI(°C)", fill = "Hour") +
+  scale_fill_viridis(option = "magma",discrete = TRUE,direction = -1)  +
+   geom_text(aes(y = label_pos, label = sprintf("%.1f", mean_HI)), check_overlap = TRUE,
+            position = position_nudge(y = 0.5),  # Nudging position up a bit
+            color = "black", fontface = "bold",family = "Palatino", alpha = 0.6, size =4) +
+  theme(text = element_text(family = "Palatino"),  # Apply Palatino to all text elements
+        axis.text.x = element_text(angle = 90, hjust = 1 ))+
+  geom_segment(x = 0, y = 0, xend = 2, yend = 0, color = "grey", alpha = 0.5, size = 0.5) +
+  expand_limits(y = c(0, max(df_max$mean_HI) * 1.8)) +
+
+  Theme 
+
+HI_19
+```
+
+```{r}
+library(ggpubr)
+figure <- ggarrange(pm25_18, pm25_19,HI_18,HI_19,
+                    labels = c("(A)", "(B)", "(C)", "(D)"),
+                    ncol = 2, nrow = 2)
+figure
+
+
+```
+
