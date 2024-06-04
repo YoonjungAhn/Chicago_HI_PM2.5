@@ -1,0 +1,135 @@
+---
+title: "EPA data"
+output: html_document
+date: "2023-12-19"
+---
+
+```{r}
+#install.packages(pkgs="RAQSAPI", dependencies = TRUE )
+#install.packages("keyring")
+library(RAQSAPI)
+library(keyring)
+library(dplyr)
+library(tidyr)
+library(data.table)
+library(zoo)
+library(lubridate)
+```
+
+
+
+```{r}
+
+datamartAPI_user <-"YOUR ID" 
+server <- "AQSDatamart"
+ 
+keyring::key_set(service = "AQSDatamart",
+                   username = "YOUR ID") 
+
+aqs_credentials(username ="YOUR ID",
+                  key = key_get(service = server,
+                                username ="YOUR ID"
+                                )
+                  )
+```
+
+
+#https://aqs.epa.gov/aqsweb/documents/data_api.html#sample
+```{r}
+# Initialize an empty data frame to store the results
+epa25hourly <- data.frame()
+
+# Loop through each year and collect the data
+for(year in c(2018,2019)) {
+  start_date <- as.Date(paste(year, "0401", sep = ""), format = "%Y%m%d")
+  end_date <- as.Date(paste(year, "0930", sep = ""), format = "%Y%m%d")
+  
+  yearly_data <- aqs_sampledata_by_state(parameter = "88101",
+                                         bdate = start_date,
+                                         edate = end_date,
+                                         stateFIPS = "17")
+
+  # Combine the data for each year
+  epa25hourly <- rbind(epa25hourly, yearly_data)
+}
+
+epa25hourlychicago <- epa25hourly %>%filter(county_code=="031" )
+data<- epa25hourlychicago%>%dplyr::select(c(site_number, date_local,time_local,sample_measurement,latitude,longitude  ))
+
+data$datetime <- as.POSIXct(paste(data$date_local, data$time_local), format="%Y-%m-%d %H:%M")
+
+data<- data%>%rename(node_id=site_number ,date =date_local, value_hrf =sample_measurement)
+data <- data%>%mutate(
+    datetime = as.POSIXct(datetime, "%Y/%m/%d %H:%M:%S",tz = "America/Chicago"),
+    date = as.Date(datetime),
+    hour = hour(datetime)
+  ) 
+
+```
+
+#quality control 
+```{r}
+# 1. Remove malfunctioning sensor data
+# Calculate the moving 5-hour standard deviation
+data <- data %>%
+  group_by(node_id, date) %>%
+  arrange(datetime) %>%
+  mutate(rolling_sd = rollapply(value_hrf, width = 5, FUN = sd, fill = NA, align = 'right'))
+
+# Filter out the readings with 0 standard deviation
+data <- data %>%
+  filter(!is.na(rolling_sd) & rolling_sd != 0)
+
+# 2. Remove implausible readings
+data <- data %>%
+  filter(value_hrf > 0 & value_hrf <= 1000)
+
+# 3. Ensure data completeness
+# Count the number of 5-minute measures per hour
+hourly_count <- data %>%
+  group_by(node_id, date, hour) %>%
+  summarise(count = n())
+
+# Filter out hours with less than 9 (of 12) 5-minute measures (note: i skip this because it is for 5 minture measures)
+#data <- data %>%
+#  semi_join(hourly_count %>%
+#              filter(count >= 9), by = c("node_id", "date", "hour"))
+
+# Count the number of hours with data per day
+daily_count <- data %>%
+  group_by(node_id, date) %>%
+  summarise(count = n_distinct(hour))
+
+# Filter out days with less than 18 (of 24) hours of data
+data <- data %>%
+  semi_join(daily_count %>%
+              filter(count >= 18), by = c("node_id", "date"))
+
+# Resulting cleaned data
+cleaned_data <- data
+
+# View the cleaned data
+head(cleaned_data)
+
+
+
+
+```
+
+
+
+
+```{r}
+epa25 <-aqs_dailysummary_by_county("88101", bdate =as.Date("20180401",format = "%Y%m%d"), edate = as.Date("20180930",format = "%Y%m%d"), stateFIPS = "17", countycode ="031") #%>%filter(city == "Chicago")
+```
+
+```{r}
+unique(epa25$site_number)
+```
+
+
+References 
+https://github.com/USEPA/RAQSAPI
+sign up : https://aqs.epa.gov/aqsweb/documents/data_api.html#signup
+i had to use https://aqs.epa.gov/data/api/signup?email=yjahn@ku.edu to get the key for api via email.
+https://aqs.epa.gov/aqsweb/documents/about_aqs_data.html
