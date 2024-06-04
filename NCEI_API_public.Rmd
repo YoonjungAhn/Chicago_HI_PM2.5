@@ -1,0 +1,49 @@
+---
+title: "API"
+output: html_document
+date: "2024-01-02"
+---
+
+```{r}
+library(httr)
+library(jsonlite)
+
+# Your API Key
+api_key <- "Your API key"
+
+# Base URL for the NOAA API
+base_url <- "https://www.ncdc.noaa.gov/cdo-web/api/v2/"
+
+# Set up parameters for your request (e.g., dataset, location, time range)
+# Note: The exact parameters will depend on the dataset and your specific requirements
+params <- list(
+  datasetid = "GHCND", # GHCND is the Global Historical Climatology Network Daily dataset
+  locationid = "CITY:US170006", # This is an example; you need the correct location ID for Chicago
+  startdate = "1990-01-01",
+  enddate = "2020-12-31",
+  units = "metric",
+  limit = 1000 # Adjust as needed
+)
+
+# Make the API Request
+response <- GET(url = base_url, query = params, add_headers(token = api_key))
+
+# Check if the request was successful
+if (response$status_code == 200) {
+  # Parse the JSON data
+  data <- fromJSON(rawToChar(response$content))
+  
+  # Extract temperature data and convert to a dataframe
+  # Note: The structure of 'data' depends on the API response format
+  temperatures <- data$results$temp
+  
+  # Calculate the 90th percentile
+  percentile_90 <- quantile(temperatures, 0.9, na.rm = TRUE)
+  
+  print(paste("The 90th percentile temperature is:", percentile_90))
+} else {
+  print("Failed to retrieve data")
+}
+
+```
+
