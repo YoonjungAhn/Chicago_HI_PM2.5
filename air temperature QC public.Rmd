@@ -1,0 +1,33 @@
+---
+title: "air temperature QC"
+output: html_document
+date: "2024-06-04"
+---
+```{r}
+library(data.table)
+library(CrowdQCplus)
+library(tidyr)
+library(dplyr)
+```
+
+
+# Quality control
+```{r}
+#combined_df$z <-45
+setDT(combined_df)
+combined_df <- cqcp_add_dem_height(combined_df ) #add elevation
+data <- cqcp_padding(combined_df )
+ok <- cqcp_check_input(data)
+
+if (ok) {
+   data_qc <- cqcp_qcCWS(data) # QC
+   n_data_qc <- cqcp_output_statistics(data_qc) # output statistics
+}
+finaldat <- data_qc%>%filter(o1==TRUE)%>%filter((p_id!= "Foster Weather Station")&(p_id!= "63rd Street Weather Station")&(p_id!= "Oak Street Weather Station" ) )
+hist(finaldat$ta)
+
+finaldat$month <- month(finaldat$time)
+test <- finaldat %>%filter(month>4&month<10)
+hist(test$ta)
+
+```
