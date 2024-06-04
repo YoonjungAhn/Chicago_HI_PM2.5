@@ -1,0 +1,70 @@
+---
+title: "PM2.5 QC public"
+output: html_document
+date: "2024-06-04"
+---
+#PM qauilty control
+```{r}
+# Assuming your dataframe is named 'data'
+library(dplyr)
+library(zoo)
+library(lubridate)
+data <- read.csv('./PM25hourly.csv')
+# Convert 'timestamp' to POSIXct
+data$datetime <- as.POSIXct(data$timestamp, format = '%Y/%m/%d %H:%M:%S', tz = "UTC")
+
+# Add date and hour columns
+data$date <- as.Date(data$datetime)
+data$hour <- hour(data$datetime)
+
+# 1. Remove malfunctioning sensor data
+# Calculate the moving 5-hour standard deviation
+data <- data %>%
+  group_by(node_id, date) %>%
+  arrange(datetime) %>%
+  mutate(rolling_sd = rollapply(value_hrf, width = 5, FUN = sd, fill = NA, align = 'right'))
+
+# Filter out the readings with 0 standard deviation
+data <- data %>%
+  filter(!is.na(rolling_sd) & rolling_sd != 0)
+
+# 2. Remove implausible readings
+data <- data %>%
+  filter(value_hrf > 0 & value_hrf <= 1000)
+
+# 3. Ensure data completeness
+# Count the number of 5-minute measures per hour
+hourly_count <- data %>%
+  group_by(node_id, date, hour) %>%
+  summarise(count = n())
+
+# Filter out hours with less than 9 (of 12) 5-minute measures
+data <- data %>%
+  semi_join(hourly_count %>%
+              filter(count >= 9), by = c("node_id", "date", "hour"))
+
+# Count the number of hours with data per day
+daily_count <- data %>%
+  group_by(node_id, date) %>%
+  summarise(count = n_distinct(hour))
+
+# Filter out days with less than 18 (of 24) hours of data
+data <- data %>%
+  semi_join(daily_count %>%
+              filter(count >= 18), by = c("node_id", "date"))
+
+# Resulting cleaned data
+cleaned_data <- data
+
+# View the cleaned data
+head(cleaned_data)
+
+# Making to hourly
+cleaned_data2 <- cleaned_data %>% dplyr::select(-c("X.1","X"))%>%
+  group_by(node_id, date, hour) %>%
+  summarize(pm25 = mean(value_hrf, na.rm = TRUE))%>%
+  mutate(datetime = as.POSIXct(paste0(date, " ", sprintf("%02d:00:00", hour)), format = "%Y-%m-%d %H:%M:%S"))
+
+
+
+```
